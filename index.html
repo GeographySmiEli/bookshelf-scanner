@@ -3,7 +3,7 @@
 <style>body{font-family:system-ui;background:#111b26;color:#f6f8fa;max-width:650px;margin:auto;padding:16px}button,input{font:inherit;padding:12px;border-radius:10px}button{background:#8cdbbc;border:0;margin:5px;color:#11251d;font-weight:bold}button:disabled{opacity:.5}input{background:#233548;color:white;border:1px solid #8193a5;max-width:55%}video{width:100%;aspect-ratio:4/3;background:#000;border-radius:14px;object-fit:cover}.card{background:#1c2a38;padding:16px;border-radius:16px;margin:14px 0}li{padding:6px}small{color:#bfcbd6}</style></head>
 <body><h1>📚 Bookshelf Scanner</h1><p>Continuous ISBN scanning — no photos needed.</p>
 <div class="card"><button id="start">Start camera</button><button id="stop" disabled>Stop</button><button id="refocus" disabled>Refocus</button><label id="zoomWrap" style="display:none">Zoom <input id="zoom" type="range" min="1" max="3" step=".1" value="1"></label><p id="status" role="status">Ready.</p><video id="video" autoplay muted playsinline></video></div>
-<div class="card"><h2>Google Sheets connection</h2><input id="bridgeUrl" placeholder="Paste your Apps Script /exec URL" style="max-width:100%;width:95%"><button id="connectBridge">Connect library</button><p id="bridgeStatus">Not connected — scans remain on this phone.</p><div id="bridgeHolder"></div></div>
+<div class="card"><h2>Google Sheets connection</h2><button id="connectBridge">Connect library</button><p id="bridgeStatus" role="status">Not connected — scans remain on this phone.</p><div id="bridgeHolder"></div><p id="saveStatus" role="status"></p></div>
 <div class="card"><h2>Manual ISBN</h2><form id="manual"><input id="isbn" placeholder="978..." inputmode="numeric" required><button>Add</button></form></div>
 <div class="card"><h2>Scanned: <span id="count">0</span></h2><button id="export">Export CSV</button><button id="copy">Copy ISBNs</button><button id="clear">Clear</button><ol id="list"></ol></div>
 <small>Camera frames stay on your phone. Scanned ISBNs are stored locally until exported. Google Sheets saves require connecting the private library bridge; local scan history is retained as backup.</small>
@@ -11,12 +11,31 @@
 const el=id=>document.getElementById(id),key='bookshelf-isbns-v1';
 let scans=[];try{scans=JSON.parse(localStorage.getItem(key)||'[]')}catch{}
 let stream=null,reader=null,active=false,last='',lastTime=0,pauseUntil=0,cameraTrack=null,focusCapabilities={};
-let bridgeFrame=null,bridgeOrigin='',bridgeReady=false,requestNum=0,pending=new Map();
+const bridgeUrl = 'https://script.google.com/macros/s/AKfycbxPwoz7VH1KIlWV-hYRMdDS4ljhsy6cjRDEakx2ClyHb2VP4YaxVgj6dSJJ-jyAEqD4/exec';
+const bridgeContentOrigin = 'https://n-nt5rpprokaysvrzowymfzfcos7o3266ijrawbsi-0lu-script.googleusercontent.com';
+let bridgeFrame, bridgeWindow, bridgeReady, bridgeTimer;
+let requestNum = 0;
+const pending = new Map();
 function say(s){el('status').textContent=s}
 function render(){el('count').textContent=scans.length;el('list').replaceChildren();for(const x of [...scans].reverse().slice(0,40)){const li=document.createElement('li');li.textContent=x.isbn;el('list').append(li)}}
 function valid(s){if(!/^\d{13}$/.test(s)||!/^97[89]/.test(s))return false;let sum=0;for(let i=0;i<12;i++)sum+=Number(s[i])*(i%2?3:1);return (10-sum%10)%10===Number(s[12])}
-function saveToLibrary(isbn){if(!bridgeReady||!bridgeFrame?.contentWindow){say('Scanned '+isbn+' — saved locally; library not connected');return}const id=String(++requestNum);pending.set(id,isbn);bridgeFrame.contentWindow.postMessage({source:'bookshelf-scanner',type:'save',id,isbn},'*');say('Saving '+isbn+' to library…')}
-function add(raw){const s=String(raw).replace(/[\s-]/g,'');if(!valid(s)){say('Not a valid ISBN-13: '+s);return}if(scans.some(x=>x.isbn===s)){say('Already scanned: '+s);return}pauseUntil=Date.now()+2000;scans.push({isbn:s,at:new Date().toISOString()});localStorage.setItem(key,JSON.stringify(scans));render();saveToLibrary(s);setTimeout(()=>{if(active&&Date.now()>=pauseUntil)say('Ready — scan next book')},2050);navigator.vibrate?.(80)}
+function saveToLibrary(isbn) {
+  const status = el('saveStatus');
+  if (!bridgeReady || !bridgeWindow) {
+    status.textContent = isbn + ' saved on this phone. Connect Google Sheets to save future scans.';
+    return;
+  }
+  if ([...pending.values()].some(request => request.isbn === isbn)) return;
+  const id = String(++requestNum);
+  const timer = setTimeout(() => {
+    pending.delete(id);
+    status.textContent = 'No Google Sheets confirmation for ' + isbn + '. You can enter it again to retry.';
+  }, 60000);
+  pending.set(id, {isbn, timer});
+  bridgeWindow.postMessage({source:'bookshelf-scanner',type:'save',id,isbn}, bridgeContentOrigin);
+  status.textContent = 'Saving ' + isbn + ' to Google Sheets…';
+}
+function add(raw, retry = false){const s=String(raw).replace(/[\s-]/g,'');if(!valid(s)){say('Not a valid ISBN-13: '+s);return}if(scans.some(x=>x.isbn===s)){say('Already scanned: '+s);if(retry&&bridgeReady)saveToLibrary(s);return}pauseUntil=Date.now()+2000;scans.push({isbn:s,at:new Date().toISOString()});localStorage.setItem(key,JSON.stringify(scans));render();saveToLibrary(s);setTimeout(()=>{if(active&&Date.now()>=pauseUntil)say('Ready — scan next book')},2050);navigator.vibrate?.(80)}
 async function stop(){active=false;el('refocus').disabled=true;el('zoomWrap').style.display='none';cameraTrack=null;reader?.reset();reader=null;stream?.getTracks().forEach(t=>t.stop());stream=null;el('video').srcObject=null;el('start').disabled=false;el('stop').disabled=true}
 function found(s){if(Date.now()<pauseUntil)return;if(!/^97[89]\d{10}$/.test(s))return;const now=Date.now();if(s===last&&now-lastTime<2500)return;last=s;lastTime=now;add(s)}
 async function scanNative(detector){while(active){try{for(const x of await detector.detect(el('video'))){found(x.rawValue);break}}catch{}await new Promise(r=>setTimeout(r,180))}}
@@ -27,11 +46,52 @@ if('BarcodeDetector' in window){const formats=await BarcodeDetector.getSupported
 say('Loading compatibility scanner...');const script=document.createElement('script');script.src='https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js';await new Promise((ok,fail)=>{script.onload=ok;script.onerror=fail;document.head.append(script)});if(!window.ZXing)throw Error('Scanner library unavailable');stream.getTracks().forEach(t=>t.stop());stream=null;cameraTrack=null;el('refocus').disabled=true;el('zoomWrap').style.display='none';reader=new ZXing.BrowserMultiFormatReader();say('Camera ready — scan ISBN barcode.');reader.decodeFromVideoDevice(undefined,el('video'),result=>{if(result)found(result.getText())}).catch(e=>say('Scanner error: '+e.message))
 }catch(e){await stop();say('Could not start camera: '+(e.message||e.name))}}
 el('refocus').onclick=refocus;el('zoom').oninput=async e=>{if(!cameraTrack)return;try{await cameraTrack.applyConstraints({advanced:[{zoom:Number(e.target.value)}]})}catch(err){say('Zoom unavailable: '+err.message)}};
-window.addEventListener('message',e=>{if(!(['https://script.google.com'].includes(e.origin)||e.origin.endsWith('.googleusercontent.com'))||e.source!==bridgeFrame?.contentWindow||e.data?.source!=='bookshelf-bridge')return;const d=e.data;if(d.type==='ready'){bridgeReady=true;el('bridgeStatus').textContent=d.connected?'Library bridge ready.':'Bridge loaded — enter your private token in the box below.';return}if(d.type==='result'&&pending.has(String(d.id))){const isbn=pending.get(String(d.id));pending.delete(String(d.id));const res=d.result||{};say(res.ok?(res.duplicate?'Already in library: '+isbn:'Saved to library: '+(res.title||isbn)):'Saved locally; library error: '+(res.error||'Unknown error'));}});
-function connectBridge(){const url=el('bridgeUrl').value.trim();try{const u=new URL(url);if(u.protocol!=='https:'||u.hostname!=='script.google.com'||!u.pathname.endsWith('/exec'))throw Error('Use your published Google Apps Script /exec URL');localStorage.setItem('bookshelf-bridge-url',url);u.searchParams.set('view','bridge');bridgeOrigin='https://script.google.com';bridgeReady=false;const frame=document.createElement('iframe');frame.src=u.href;frame.title='Private library connection';frame.style='width:100%;min-height:185px;border:1px solid #8193a5;border-radius:10px;background:#1c2a38';el('bridgeHolder').replaceChildren(frame);bridgeFrame=frame;el('bridgeStatus').textContent='Loading connection…';frame.onload=()=>frame.contentWindow?.postMessage({source:'bookshelf-scanner',type:'hello'},'*')}catch(e){el('bridgeStatus').textContent=e.message}}
-el('connectBridge').onclick=connectBridge;const storedBridge=localStorage.getItem('bookshelf-bridge-url');if(storedBridge)el('bridgeUrl').value=storedBridge;
+window.addEventListener('message', event => {
+  if (event.origin !== bridgeContentOrigin || event.data?.source !== 'bookshelf-bridge') return;
+  let frame = event.source;
+  while (frame && frame !== window && frame !== bridgeFrame?.contentWindow) {
+    const parent = frame.parent;
+    if (parent === frame) return;
+    frame = parent;
+  }
+  if (!frame || frame !== bridgeFrame?.contentWindow) return;
+  const data = event.data;
+  if (data.type === 'ready') {
+    clearTimeout(bridgeTimer);
+    bridgeWindow = event.source;
+    bridgeReady = data.connected === true;
+    el('bridgeStatus').textContent = bridgeReady ? 'Google Sheets connected.' : 'Enter your private token below to connect.';
+    return;
+  }
+  if (event.source !== bridgeWindow || data.type !== 'result') return;
+  const request = pending.get(String(data.id));
+  if (!request) return;
+  clearTimeout(request.timer);
+  pending.delete(String(data.id));
+  const result = data.result || {};
+  el('saveStatus').textContent = result.ok
+    ? result.duplicate ? 'Already in Google Sheets: ' + request.isbn : 'Saved to Google Sheets: ' + (result.title || request.isbn)
+    : 'Saved on this phone. Google Sheets: ' + (result.error || 'Unknown error');
+});
+function connectBridge() {
+  clearTimeout(bridgeTimer);
+  bridgeReady = false;
+  bridgeWindow = null;
+  const frame = document.createElement('iframe');
+  frame.src = bridgeUrl;
+  frame.title = 'Private library connection';
+  frame.style = 'width:100%;min-height:185px;border:1px solid #8193a5;border-radius:10px;background:#1c2a38';
+  bridgeFrame = frame;
+  el('bridgeStatus').textContent = 'Connecting to Google Sheets…';
+  el('bridgeHolder').replaceChildren(frame);
+  bridgeTimer = setTimeout(() => {
+    el('bridgeStatus').textContent = 'Google Sheets connection timed out. Tap Connect library to retry.';
+  }, 15000);
+}
+el('connectBridge').onclick = connectBridge;
+connectBridge();
 el('start').onclick=start;el('stop').onclick=()=>{stop();say('Stopped.')};
-el('manual').onsubmit=e=>{e.preventDefault();add(el('isbn').value);el('isbn').value=''};
+el('manual').onsubmit=e=>{e.preventDefault();add(el('isbn').value,true);el('isbn').value=''};
 el('export').onclick=()=>{const csv='ISBN,Scanned At\n'+scans.map(x=>x.isbn+','+x.at).join('\n');const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download='bookshelf-scans.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)};
 el('copy').onclick=async()=>{await navigator.clipboard.writeText(scans.map(x=>x.isbn).join('\n'));say('Copied ISBNs')};
 el('clear').onclick=()=>{if(confirm('Clear saved scans on this device?')){scans=[];localStorage.removeItem(key);render()}};
