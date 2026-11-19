@@ -36,7 +36,8 @@ input[type=range] { accent-color:var(--plum); width:min(220px,70%); vertical-ali
 #status,#bridgeStatus,#saveStatus { margin:8px 0; color:var(--muted); font-size:.91rem; overflow-wrap:anywhere; }
 #saveStatus:not(:empty) { padding:8px 10px; background:#f1e9f4; border-radius:6px; color:#4f3157; }
 #saveStatus:empty { margin:0; }
-#bridgeHolder iframe { display:block; width:100%; height:170px; border:1px solid var(--line); border-radius:8px; background:#f7f2f8; }
+#googleSignIn:not(:empty), #googleSignOut { margin-top:10px; }
+[hidden] { display:none !important; }
 #manual { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; }
 #list { margin:10px 0 0; padding-inline-start:1.6rem; font-variant-numeric:tabular-nums; }
 #list:empty { display:none; }
@@ -68,7 +69,8 @@ footer { max-width:1100px; margin:auto; padding:0 clamp(16px,4vw,32px) 20px; col
     <section class="card" aria-labelledby="connectionHeading">
       <div class="section-heading"><h2 id="connectionHeading">Google Sheets</h2><button id="connectBridge" hidden>Retry connection</button></div>
       <p id="bridgeStatus" role="status">Scans are saved on this device.</p>
-      <div id="bridgeHolder"></div><p id="saveStatus" role="status"></p>
+      <div id="googleSignIn"></div><button id="googleSignOut" hidden>Sign out of scanner</button>
+      <div id="bridgeHolder" hidden></div><p id="saveStatus" role="status"></p>
     </section>
     <section class="card">
       <div class="section-heading"><h2><label for="isbn">Manual ISBN</label></h2></div>
@@ -88,7 +90,39 @@ let scans=[];try{scans=JSON.parse(localStorage.getItem(key)||'[]')}catch{}
 let stream=null,reader=null,active=false,last='',lastTime=0,pauseUntil=0,cameraTrack=null,focusCapabilities={};
 const bridgeUrl = 'https://script.google.com/macros/s/AKfycbxPwoz7VH1KIlWV-hYRMdDS4ljhsy6cjRDEakx2ClyHb2VP4YaxVgj6dSJJ-jyAEqD4/exec';
 const bridgeContentOrigin = 'https://n-nt5rpprokaysvrzowymfzfcos7o3266ijrawbsi-0lu-script.googleusercontent.com';
-let bridgeFrame, bridgeWindow, bridgeReady, bridgeTimer;
+const googleClientId = '327062333717-b1m6fomha5utl3c5lc6iskieut8v2bqv.apps.googleusercontent.com';
+let bridgeFrame, bridgeWindow, bridgeReady, bridgeTimer, authTimer, expiryTimer;
+let googleInitialized = false;
+
+function showSignIn(message) {
+  clearTimeout(authTimer);
+  clearTimeout(expiryTimer);
+  bridgeReady = false;
+  el('googleSignOut').hidden = true;
+  el('googleSignIn').hidden = false;
+  el('bridgeStatus').textContent = message;
+}
+
+function renderGoogleButton() {
+  if (!bridgeWindow || !window.google?.accounts?.id || googleInitialized) return;
+  google.accounts.id.initialize({client_id:googleClientId, callback:({credential}) => {
+    if (!bridgeWindow || typeof credential !== 'string') return;
+    clearTimeout(authTimer);
+    bridgeReady = false;
+    el('googleSignIn').hidden = true;
+    el('bridgeStatus').textContent = 'Verifying your Google account…';
+    bridgeWindow.postMessage({source:'bookshelf-scanner',type:'signin',credential},bridgeContentOrigin);
+    authTimer = setTimeout(() => showSignIn('Sign-in timed out. Try again.'),15000);
+  }});
+  google.accounts.id.renderButton(el('googleSignIn'),{theme:'outline',size:'large',text:'signin_with'});
+  googleInitialized = true;
+}
+
+function signOut(message) {
+  if (bridgeWindow) bridgeWindow.postMessage({source:'bookshelf-scanner',type:'signout'},bridgeContentOrigin);
+  window.google?.accounts?.id?.disableAutoSelect();
+  showSignIn(message);
+}
 let requestNum = 0;
 const pending = new Map();
 function say(s){el('status').textContent=s}
@@ -135,28 +169,50 @@ window.addEventListener('message', event => {
     clearTimeout(bridgeTimer);
     el('connectBridge').hidden = true;
     bridgeWindow = event.source;
-    bridgeReady = data.connected === true;
-    el('bridgeStatus').textContent = bridgeReady ? 'Google Sheets connected.' : 'Connect to save new scans to your library.';
+    if (data.protocol !== 2) {
+      el('bridgeStatus').textContent = 'The Google sign-in bridge is updating. Try again shortly.';
+      el('connectBridge').hidden = false;
+      return;
+    }
+    showSignIn('Sign in to save scans to your library.');
+    renderGoogleButton();
     return;
   }
-  if (event.source !== bridgeWindow || data.type !== 'result') return;
+  if (event.source !== bridgeWindow) return;
+  if (data.type === 'auth') {
+    if (!data.result?.ok) return showSignIn(data.result?.error || 'Google sign-in failed. Try again.');
+    clearTimeout(authTimer);
+    bridgeReady = true;
+    el('googleSignIn').hidden = true;
+    el('googleSignOut').hidden = false;
+    el('bridgeStatus').textContent = 'Google Sheets connected.';
+    expiryTimer = setTimeout(() => signOut('Sign in again to keep saving to Google Sheets.'), Math.max(0,data.result.expiresAt - Date.now()));
+    return;
+  }
+  if (data.type !== 'result') return;
   const request = pending.get(String(data.id));
   if (!request) return;
   clearTimeout(request.timer);
   pending.delete(String(data.id));
   const result = data.result || {};
+  if (result.authRequired) signOut('Sign in again to save to Google Sheets.');
   el('saveStatus').textContent = result.ok
     ? result.duplicate ? 'Already in Google Sheets: ' + request.isbn : 'Saved to Google Sheets: ' + (result.title || request.isbn)
     : 'Saved on this phone. Google Sheets: ' + (result.error || 'Unknown error');
 });
 function connectBridge() {
   clearTimeout(bridgeTimer);
+  clearTimeout(authTimer);
+  clearTimeout(expiryTimer);
+  el('googleSignIn').hidden = true;
+  el('googleSignOut').hidden = true;
   bridgeReady = false;
   bridgeWindow = null;
   el('connectBridge').hidden = true;
   const frame = document.createElement('iframe');
   frame.src = bridgeUrl;
   frame.title = 'Private library connection';
+  frame.tabIndex = -1;
   bridgeFrame = frame;
   el('bridgeStatus').textContent = 'Connecting to Google Sheets…';
   el('bridgeHolder').replaceChildren(frame);
@@ -166,6 +222,15 @@ function connectBridge() {
   }, 15000);
 }
 el('connectBridge').onclick = connectBridge;
+el('googleSignOut').onclick = () => signOut('Signed out. New scans stay on this device until you sign in.');
+const googleScript = document.createElement('script');
+googleScript.src = 'https://accounts.google.com/gsi/client';
+googleScript.async = true;
+googleScript.onload = renderGoogleButton;
+googleScript.onerror = () => {
+  el('bridgeStatus').textContent = 'Couldn’t load Google sign-in. Refresh the page to retry.';
+};
+document.head.append(googleScript);
 connectBridge();
 el('start').onclick=start;el('stop').onclick=()=>{stop();say('Stopped.')};
 el('manual').onsubmit=e=>{e.preventDefault();add(el('isbn').value,true);el('isbn').value=''};
