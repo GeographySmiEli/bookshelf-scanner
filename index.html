@@ -66,7 +66,7 @@ footer { max-width:1100px; margin:auto; padding:0 clamp(16px,4vw,32px) 20px; col
   </section>
   <div class="sidebar">
     <section class="card" aria-labelledby="connectionHeading">
-      <div class="section-heading"><h2 id="connectionHeading">Google Sheets</h2><button id="connectBridge">Connect library</button></div>
+      <div class="section-heading"><h2 id="connectionHeading">Google Sheets</h2><button id="connectBridge" hidden>Retry connection</button></div>
       <p id="bridgeStatus" role="status">Scans are saved on this device.</p>
       <div id="bridgeHolder"></div><p id="saveStatus" role="status"></p>
     </section>
@@ -133,9 +133,10 @@ window.addEventListener('message', event => {
   const data = event.data;
   if (data.type === 'ready') {
     clearTimeout(bridgeTimer);
+    el('connectBridge').hidden = true;
     bridgeWindow = event.source;
     bridgeReady = data.connected === true;
-    el('bridgeStatus').textContent = bridgeReady ? 'Google Sheets connected.' : 'Enter your private token below to connect.';
+    el('bridgeStatus').textContent = bridgeReady ? 'Google Sheets connected.' : 'Connect to save new scans to your library.';
     return;
   }
   if (event.source !== bridgeWindow || data.type !== 'result') return;
@@ -152,6 +153,7 @@ function connectBridge() {
   clearTimeout(bridgeTimer);
   bridgeReady = false;
   bridgeWindow = null;
+  el('connectBridge').hidden = true;
   const frame = document.createElement('iframe');
   frame.src = bridgeUrl;
   frame.title = 'Private library connection';
@@ -159,7 +161,8 @@ function connectBridge() {
   el('bridgeStatus').textContent = 'Connecting to Google Sheets…';
   el('bridgeHolder').replaceChildren(frame);
   bridgeTimer = setTimeout(() => {
-    el('bridgeStatus').textContent = 'Google Sheets connection timed out. Tap Connect library to retry.';
+    el('bridgeStatus').textContent = 'Couldn’t reach Google Sheets. Scans are still saved on this device.';
+    el('connectBridge').hidden = false;
   }, 15000);
 }
 el('connectBridge').onclick = connectBridge;
