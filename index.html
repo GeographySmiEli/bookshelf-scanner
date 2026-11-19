@@ -40,6 +40,9 @@ input[type=range] { accent-color:var(--plum); width:min(220px,70%); vertical-ali
 [hidden] { display:none !important; }
 #scanMode,#movieFormat { font:inherit; min-height:44px; padding:6px 10px; border:1px solid #b9a9c1; border-radius:7px; background:#fff; color:var(--ink); }
 #movieForm { display:grid; gap:7px; }
+#movieLookupStatus { margin:0; color:var(--muted); }
+#movieLookupStatus:empty { display:none; }
+#movieForm input[type=checkbox] { width:auto; min-height:0; }
 #movieForm button { justify-self:start; margin-top:4px; }
 #manual { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; }
 #list { margin:10px 0 0; padding-inline-start:1.6rem; font-variant-numeric:tabular-nums; }
@@ -81,6 +84,8 @@ footer { max-width:1100px; margin:auto; padding:0 clamp(16px,4vw,32px) 20px; col
       <form id="manual"><input id="isbn" placeholder="978…" inputmode="numeric" required><button class="primary">Add</button></form>
       <form id="movieForm" hidden>
         <label for="movieBarcode">UPC or EAN barcode</label><input id="movieBarcode" inputmode="numeric" required>
+        <p id="movieLookupStatus" role="status"></p>
+        <label id="movieIdentityLabel" hidden><input id="useMovieIdentity" type="checkbox" checked> <span id="movieIdentityText"></span></label>
         <label for="movieTitle">Movie title</label><input id="movieTitle" maxlength="250" required>
         <label for="movieFormat">Disc format</label><select id="movieFormat" required><option value="">Choose a format</option><option>DVD</option><option>Blu-ray</option><option>4K Ultra HD Blu-ray</option><option>Combo pack</option><option>Other</option></select>
         <button class="primary">Add movie</button>
@@ -156,6 +161,53 @@ function saveToLibrary(isbn, movie) {
 }
 function add(raw, retry = false){const s=String(raw).replace(/[\s-]/g,'');if(!valid(s)){say('Not a valid ISBN-13: '+s);return}if(scans.some(x=>x.isbn===s)){say('Already scanned: '+s);if(retry&&bridgeReady)saveToLibrary(s);return}pauseUntil=Date.now()+2000;scans.push({isbn:s,at:new Date().toISOString()});localStorage.setItem(key,JSON.stringify(scans));render();saveToLibrary(s);setTimeout(()=>{if(active&&Date.now()>=pauseUntil)say('Ready — scan next book')},2050);navigator.vibrate?.(80)}
 async function stop(){active=false;el('refocus').disabled=true;el('zoomWrap').style.display='none';cameraTrack=null;reader?.reset();reader=null;stream?.getTracks().forEach(t=>t.stop());stream=null;el('video').srcObject=null;el('start').disabled=false;el('stop').disabled=true}
+let movieLookupRequest = 0;
+let movieLookupTimer;
+let matchedMovieTitle = '';
+
+function requestMovieLookup() {
+  clearTimeout(movieLookupTimer);
+  const id = ++movieLookupRequest;
+  const barcode = el('movieBarcode').value.replace(/[\s-]/g, '');
+  const status = el('movieLookupStatus');
+  el('movieIdentityLabel').hidden = true;
+  matchedMovieTitle = '';
+  status.textContent = '';
+  if (!validMovieBarcode(barcode)) return;
+  if (!bridgeReady || !bridgeWindow) {
+    status.textContent = 'Sign in to look up the disc automatically.';
+    return;
+  }
+  status.textContent = 'Looking up the disc…';
+  bridgeWindow.postMessage({source:'bookshelf-scanner',type:'movieLookup',id,barcode}, bridgeContentOrigin);
+  movieLookupTimer = setTimeout(() => {
+    if (id !== movieLookupRequest) return;
+    movieLookupRequest++;
+    status.textContent = 'Lookup timed out. You can enter the movie details.';
+  }, 15000);
+}
+
+function showMovieLookup(result) {
+  const status = el('movieLookupStatus');
+  if (!result?.title) {
+    status.textContent = result?.authRequired ? 'Sign in again to look up the disc.'
+      : result?.unavailable ? 'Lookup unavailable. You can enter the movie details.'
+      : 'No barcode match. You can enter the movie details.';
+    return;
+  }
+  const title = el('movieTitle');
+  if (!title.value.trim()) title.value = result.title;
+  const format = el('movieFormat');
+  if (!format.value && result.format) format.value = result.format;
+  if (result.tmdbId && title.value.trim() === result.title) {
+    matchedMovieTitle = result.title;
+    el('useMovieIdentity').checked = true;
+    el('movieIdentityLabel').hidden = false;
+    el('movieIdentityText').textContent = 'Use TMDb match: ' + result.title + (result.releaseYear ? ' (' + result.releaseYear + ')' : '') + ' · ID ' + result.tmdbId;
+  }
+  status.textContent = 'Barcode match: ' + result.title + '. Check the title and format before adding.';
+}
+
 function validMovieBarcode(barcode) {
   if (!/^\d{12,13}$/.test(barcode)) return false;
   const canonical = barcode.padStart(13, '0');
@@ -175,7 +227,8 @@ function found(barcode) {
       el('movieTitle').value = prior.movie.title;
       el('movieFormat').value = prior.movie.format;
     }
-    say('Barcode captured. Enter the movie title and disc format, then tap Add movie.');
+    requestMovieLookup();
+    say('Barcode captured. Review the movie details below.');
     navigator.vibrate?.(80);
     return;
   }
@@ -225,7 +278,12 @@ window.addEventListener('message', event => {
     el('googleSignIn').hidden = true;
     el('googleSignOut').hidden = false;
     el('bridgeStatus').textContent = 'Google Sheets connected.';
+    if (el('scanMode').value === 'movie') requestMovieLookup();
     expiryTimer = setTimeout(() => signOut('Sign in again to keep saving to Google Sheets.'), Math.max(0,data.result.expiresAt - Date.now()));
+    return;
+  }
+  if (data.type === 'movieLookup') {
+    if (data.id === movieLookupRequest) { clearTimeout(movieLookupTimer); showMovieLookup(data.result); }
     return;
   }
   if (data.type !== 'result') return;
@@ -280,6 +338,17 @@ el('scanMode').onchange = () => {
   el('movieHeading').hidden = !movieMode;
   say(movieMode ? 'Scan a disc barcode or enter it below.' : 'Scan a book ISBN or enter it below.');
 };
+el('movieBarcode').addEventListener('input', () => {
+  movieLookupRequest++;
+  clearTimeout(movieLookupTimer);
+  el('movieIdentityLabel').hidden = true;
+  matchedMovieTitle = '';
+  el('movieLookupStatus').textContent = '';
+  movieLookupTimer = setTimeout(requestMovieLookup, 350);
+});
+el('movieTitle').addEventListener('input', () => {
+  el('movieIdentityLabel').hidden = !matchedMovieTitle || el('movieTitle').value.trim() !== matchedMovieTitle;
+});
 el('movieForm').onsubmit = event => {
   event.preventDefault();
   const isbn = el('movieBarcode').value.replace(/[\s-]/g, '');
@@ -287,7 +356,7 @@ el('movieForm').onsubmit = event => {
     el('saveStatus').textContent = 'Enter a valid 12- or 13-digit disc barcode.';
     return;
   }
-  const movie = {title:el('movieTitle').value.trim(),format:el('movieFormat').value};
+  const movie = {title:el('movieTitle').value.trim(),format:el('movieFormat').value,useIdentity:!el('movieIdentityLabel').hidden && el('useMovieIdentity').checked};
   if (!movie.title) { el('movieTitle').focus(); return; }
   const prior = scans.find(scan => scan.movie && scan.isbn.padStart(13, '0') === isbn.padStart(13, '0'));
   if (prior) prior.movie = movie;
@@ -296,6 +365,7 @@ el('movieForm').onsubmit = event => {
   render();
   saveToLibrary(isbn, movie);
   el('movieForm').reset();
+  requestMovieLookup();
   last = isbn;
   lastTime = Date.now();
   pauseUntil = Date.now() + 3500;
