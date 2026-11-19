@@ -38,6 +38,9 @@ input[type=range] { accent-color:var(--plum); width:min(220px,70%); vertical-ali
 #saveStatus:empty { margin:0; }
 #googleSignIn:not(:empty), #googleSignOut { margin-top:10px; }
 [hidden] { display:none !important; }
+#scanMode,#movieFormat { font:inherit; min-height:44px; padding:6px 10px; border:1px solid #b9a9c1; border-radius:7px; background:#fff; color:var(--ink); }
+#movieForm { display:grid; gap:7px; }
+#movieForm button { justify-self:start; margin-top:4px; }
 #manual { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; }
 #list { margin:10px 0 0; padding-inline-start:1.6rem; font-variant-numeric:tabular-nums; }
 #list:empty { display:none; }
@@ -51,11 +54,12 @@ footer { max-width:1100px; margin:auto; padding:0 clamp(16px,4vw,32px) 20px; col
 <body>
 <header class="masthead"><div class="masthead-inner">
   <h1>Bookshelf Scanner</h1>
-  <p>Scan book barcodes into your home library.</p>
+  <p>Scan books, DVDs, and Blu-rays into your home library.</p>
 </div></header>
 <main>
   <section class="card" aria-labelledby="cameraHeading">
     <h2 id="cameraHeading">Scan a barcode</h2>
+    <label for="scanMode">Scan mode</label> <select id="scanMode"><option value="book">Books</option><option value="movie">DVDs &amp; Blu-rays</option></select>
     <div class="actions camera-actions">
       <button id="start" class="primary">Start camera</button>
       <button id="stop" disabled>Stop</button>
@@ -73,8 +77,14 @@ footer { max-width:1100px; margin:auto; padding:0 clamp(16px,4vw,32px) 20px; col
       <div id="bridgeHolder" hidden></div><p id="saveStatus" role="status"></p>
     </section>
     <section class="card">
-      <div class="section-heading"><h2><label for="isbn">Manual ISBN</label></h2></div>
+      <div class="section-heading"><h2><label id="bookHeading" for="isbn">Manual ISBN</label><span id="movieHeading" hidden>Add a movie</span></h2></div>
       <form id="manual"><input id="isbn" placeholder="978…" inputmode="numeric" required><button class="primary">Add</button></form>
+      <form id="movieForm" hidden>
+        <label for="movieBarcode">UPC or EAN barcode</label><input id="movieBarcode" inputmode="numeric" required>
+        <label for="movieTitle">Movie title</label><input id="movieTitle" maxlength="250" required>
+        <label for="movieFormat">Disc format</label><select id="movieFormat" required><option value="">Choose a format</option><option>DVD</option><option>Blu-ray</option><option>4K Ultra HD Blu-ray</option><option>Combo pack</option><option>Other</option></select>
+        <button class="primary">Add movie</button>
+      </form>
     </section>
     <section class="card" aria-labelledby="historyHeading">
       <div class="section-heading"><h2 id="historyHeading">Scan history</h2><span id="count" aria-label="Scan count">0</span></div>
@@ -126,33 +136,62 @@ function signOut(message) {
 let requestNum = 0;
 const pending = new Map();
 function say(s){el('status').textContent=s}
-function render(){el('count').textContent=scans.length;el('list').replaceChildren();for(const x of [...scans].reverse().slice(0,40)){const li=document.createElement('li');li.textContent=x.isbn;el('list').append(li)}}
+function render(){el('count').textContent=scans.length;el('list').replaceChildren();for(const x of [...scans].reverse().slice(0,40)){const li=document.createElement('li');li.textContent=x.movie ? x.movie.title + ' · ' + x.movie.format + ' · ' + x.isbn : x.isbn;el('list').append(li)}}
 function valid(s){if(!/^\d{13}$/.test(s)||!/^97[89]/.test(s))return false;let sum=0;for(let i=0;i<12;i++)sum+=Number(s[i])*(i%2?3:1);return (10-sum%10)%10===Number(s[12])}
-function saveToLibrary(isbn) {
+function saveToLibrary(isbn, movie) {
   const status = el('saveStatus');
   if (!bridgeReady || !bridgeWindow) {
     status.textContent = isbn + ' saved on this phone. Connect Google Sheets to save future scans.';
     return;
   }
-  if ([...pending.values()].some(request => request.isbn === isbn)) return;
+  if ([...pending.values()].some(request => request.isbn === isbn && Boolean(request.movie) === Boolean(movie))) return;
   const id = String(++requestNum);
   const timer = setTimeout(() => {
     pending.delete(id);
     status.textContent = 'No Google Sheets confirmation for ' + isbn + '. You can enter it again to retry.';
   }, 60000);
-  pending.set(id, {isbn, timer});
-  bridgeWindow.postMessage({source:'bookshelf-scanner',type:'save',id,isbn}, bridgeContentOrigin);
+  pending.set(id, {isbn, timer, movie});
+  bridgeWindow.postMessage({source:'bookshelf-scanner',type:'save',id,isbn,movie}, bridgeContentOrigin);
   status.textContent = 'Saving ' + isbn + ' to Google Sheets…';
 }
 function add(raw, retry = false){const s=String(raw).replace(/[\s-]/g,'');if(!valid(s)){say('Not a valid ISBN-13: '+s);return}if(scans.some(x=>x.isbn===s)){say('Already scanned: '+s);if(retry&&bridgeReady)saveToLibrary(s);return}pauseUntil=Date.now()+2000;scans.push({isbn:s,at:new Date().toISOString()});localStorage.setItem(key,JSON.stringify(scans));render();saveToLibrary(s);setTimeout(()=>{if(active&&Date.now()>=pauseUntil)say('Ready — scan next book')},2050);navigator.vibrate?.(80)}
 async function stop(){active=false;el('refocus').disabled=true;el('zoomWrap').style.display='none';cameraTrack=null;reader?.reset();reader=null;stream?.getTracks().forEach(t=>t.stop());stream=null;el('video').srcObject=null;el('start').disabled=false;el('stop').disabled=true}
-function found(s){if(Date.now()<pauseUntil)return;if(!/^97[89]\d{10}$/.test(s))return;const now=Date.now();if(s===last&&now-lastTime<2500)return;last=s;lastTime=now;add(s)}
+function validMovieBarcode(barcode) {
+  if (!/^\d{12,13}$/.test(barcode)) return false;
+  const canonical = barcode.padStart(13, '0');
+  if (/^97[89]/.test(canonical)) return false;
+  let sum = 0;
+  for (let i = 0; i < 12; i++) sum += Number(canonical[i]) * (i % 2 ? 3 : 1);
+  return (10 - sum % 10) % 10 === Number(canonical[12]);
+}
+
+function found(barcode) {
+  if (Date.now() < pauseUntil) return;
+  if (el('scanMode').value === 'movie') {
+    if (!validMovieBarcode(barcode) || el('movieBarcode').value || (barcode === last && Date.now() - lastTime < 8000)) return;
+    el('movieBarcode').value = barcode;
+    const prior = scans.find(scan => scan.movie && scan.isbn.padStart(13, '0') === barcode.padStart(13, '0'));
+    if (prior) {
+      el('movieTitle').value = prior.movie.title;
+      el('movieFormat').value = prior.movie.format;
+    }
+    say('Barcode captured. Enter the movie title and disc format, then tap Add movie.');
+    navigator.vibrate?.(80);
+    return;
+  }
+  if (!valid(barcode)) return;
+  const now = Date.now();
+  if (barcode === last && now - lastTime < 2500) return;
+  last = barcode;
+  lastTime = now;
+  add(barcode);
+}
 async function scanNative(detector){while(active){try{for(const x of await detector.detect(el('video'))){found(x.rawValue);break}}catch{}await new Promise(r=>setTimeout(r,180))}}
 function setupFocus(track){cameraTrack=track;focusCapabilities=track?.getCapabilities?.()||{};el('refocus').disabled=false;const z=focusCapabilities.zoom;if(z&&Number.isFinite(z.min)&&Number.isFinite(z.max)){el('zoomWrap').style.display='inline-block';el('zoom').min=z.min;el('zoom').max=z.max;el('zoom').step=z.step||0.1;el('zoom').value=track.getSettings?.().zoom||z.min}else el('zoomWrap').style.display='none'}
 async function refocus(){const track=cameraTrack;if(!track){say('Start camera first.');return}try{const caps=track.getCapabilities?.()||{};if(caps.focusMode?.includes('single-shot')){await track.applyConstraints({advanced:[{focusMode:'single-shot'}]});say('Refocus requested — hold the barcode steady.')}else if(caps.focusMode?.includes('continuous')){await track.applyConstraints({advanced:[{focusMode:'continuous'}]});say('Autofocus active — move the book slightly farther away, then closer.')}else{say('Manual refocus unavailable on this camera. Move the book farther away and back to trigger autofocus.')}}catch(e){say('Refocus unavailable: '+e.message)}}
 async function start(){el('start').disabled=true;say('Requesting camera...');try{stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false});el('video').srcObject=stream;await el('video').play();active=true;el('stop').disabled=false;setupFocus(stream.getVideoTracks()[0]);
-if('BarcodeDetector' in window){const formats=await BarcodeDetector.getSupportedFormats();if(formats.includes('ean_13')){say('Camera ready — scan ISBN barcode.');scanNative(new BarcodeDetector({formats:['ean_13']}));return}}
-say('Loading compatibility scanner...');const script=document.createElement('script');script.src='https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js';await new Promise((ok,fail)=>{script.onload=ok;script.onerror=fail;document.head.append(script)});if(!window.ZXing)throw Error('Scanner library unavailable');stream.getTracks().forEach(t=>t.stop());stream=null;cameraTrack=null;el('refocus').disabled=true;el('zoomWrap').style.display='none';reader=new ZXing.BrowserMultiFormatReader();say('Camera ready — scan ISBN barcode.');reader.decodeFromVideoDevice(undefined,el('video'),result=>{if(result)found(result.getText())}).catch(e=>say('Scanner error: '+e.message))
+if('BarcodeDetector' in window){const formats=await BarcodeDetector.getSupportedFormats();if(formats.includes('ean_13')){say('Camera ready — scan a barcode.');scanNative(new BarcodeDetector({formats:['ean_13','upc_a'].filter(format => formats.includes(format))}));return}}
+say('Loading compatibility scanner...');const script=document.createElement('script');script.src='https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js';await new Promise((ok,fail)=>{script.onload=ok;script.onerror=fail;document.head.append(script)});if(!window.ZXing)throw Error('Scanner library unavailable');stream.getTracks().forEach(t=>t.stop());stream=null;cameraTrack=null;el('refocus').disabled=true;el('zoomWrap').style.display='none';reader=new ZXing.BrowserMultiFormatReader();say('Camera ready — scan a barcode.');reader.decodeFromVideoDevice(undefined,el('video'),result=>{if(result)found(result.getText())}).catch(e=>say('Scanner error: '+e.message))
 }catch(e){await stop();say('Could not start camera: '+(e.message||e.name))}}
 el('refocus').onclick=refocus;el('zoom').oninput=async e=>{if(!cameraTrack)return;try{await cameraTrack.applyConstraints({advanced:[{zoom:Number(e.target.value)}]})}catch(err){say('Zoom unavailable: '+err.message)}};
 window.addEventListener('message', event => {
@@ -233,8 +272,36 @@ googleScript.onerror = () => {
 document.head.append(googleScript);
 connectBridge();
 el('start').onclick=start;el('stop').onclick=()=>{stop();say('Stopped.')};
+el('scanMode').onchange = () => {
+  const movieMode = el('scanMode').value === 'movie';
+  el('manual').hidden = movieMode;
+  el('bookHeading').hidden = movieMode;
+  el('movieForm').hidden = !movieMode;
+  el('movieHeading').hidden = !movieMode;
+  say(movieMode ? 'Scan a disc barcode or enter it below.' : 'Scan a book ISBN or enter it below.');
+};
+el('movieForm').onsubmit = event => {
+  event.preventDefault();
+  const isbn = el('movieBarcode').value.replace(/[\s-]/g, '');
+  if (!validMovieBarcode(isbn)) {
+    el('saveStatus').textContent = 'Enter a valid 12- or 13-digit disc barcode.';
+    return;
+  }
+  const movie = {title:el('movieTitle').value.trim(),format:el('movieFormat').value};
+  if (!movie.title) { el('movieTitle').focus(); return; }
+  const prior = scans.find(scan => scan.movie && scan.isbn.padStart(13, '0') === isbn.padStart(13, '0'));
+  if (prior) prior.movie = movie;
+  else scans.push({isbn, movie, at:new Date().toISOString()});
+  localStorage.setItem(key, JSON.stringify(scans));
+  render();
+  saveToLibrary(isbn, movie);
+  el('movieForm').reset();
+  last = isbn;
+  lastTime = Date.now();
+  pauseUntil = Date.now() + 3500;
+};
 el('manual').onsubmit=e=>{e.preventDefault();add(el('isbn').value,true);el('isbn').value=''};
-el('export').onclick=()=>{const csv='ISBN,Scanned At\n'+scans.map(x=>x.isbn+','+x.at).join('\n');const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download='bookshelf-scans.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)};
+el('export').onclick=()=>{const quote = value => '"' + String(value).replace(/^[=+\-@\t\r\n]/, character => "'" + character).replace(/"/g, '""') + '"'; const csv='Barcode,Scanned At,Type,Title,Format\n'+scans.map(x=>[x.isbn,x.at,x.movie?'Movie':'Book',x.movie?.title||'',x.movie?.format||''].map(quote).join(',')).join('\n');const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download='bookshelf-scans.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)};
 el('copy').onclick=async()=>{await navigator.clipboard.writeText(scans.map(x=>x.isbn).join('\n'));say('Copied ISBNs')};
 el('clear').onclick=()=>{if(confirm('Clear saved scans on this device?')){scans=[];localStorage.removeItem(key);render()}};
 render();
