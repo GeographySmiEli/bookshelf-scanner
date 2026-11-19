@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Bookshelf Scanner</title>
+<style>body{font-family:system-ui;background:#111b26;color:#f6f8fa;max-width:650px;margin:auto;padding:16px}button,input{font:inherit;padding:12px;border-radius:10px}button{background:#8cdbbc;border:0;margin:5px;color:#11251d;font-weight:bold}button:disabled{opacity:.5}input{background:#233548;color:white;border:1px solid #8193a5;max-width:55%}video{width:100%;aspect-ratio:4/3;background:#000;border-radius:14px;object-fit:cover}.card{background:#1c2a38;padding:16px;border-radius:16px;margin:14px 0}li{padding:6px}small{color:#bfcbd6}</style></head>
+<body><h1>📚 Bookshelf Scanner</h1><p>Continuous ISBN scanning — no photos needed.</p>
+<div class="card"><button id="start">Start camera</button><button id="stop" disabled>Stop</button><p id="status" role="status">Ready.</p><video id="video" autoplay muted playsinline></video></div>
+<div class="card"><h2>Manual ISBN</h2><form id="manual"><input id="isbn" placeholder="978..." inputmode="numeric" required><button>Add</button></form></div>
+<div class="card"><h2>Scanned: <span id="count">0</span></h2><button id="export">Export CSV</button><button id="copy">Copy ISBNs</button><button id="clear">Clear</button><ol id="list"></ol></div>
+<small>Camera frames stay on your phone. Scanned ISBNs are stored locally until exported. No Google Sheets connection yet.</small>
+<script>
+const el=id=>document.getElementById(id),key='bookshelf-isbns-v1';
+let scans=[];try{scans=JSON.parse(localStorage.getItem(key)||'[]')}catch{}
+let stream=null,reader=null,active=false,last='',lastTime=0;
+function say(s){el('status').textContent=s}
+function render(){el('count').textContent=scans.length;el('list').replaceChildren();for(const x of [...scans].reverse().slice(0,40)){const li=document.createElement('li');li.textContent=x.isbn;el('list').append(li)}}
+function valid(s){if(!/^\d{13}$/.test(s)||!/^97[89]/.test(s))return false;let sum=0;for(let i=0;i<12;i++)sum+=Number(s[i])*(i%2?3:1);return (10-sum%10)%10===Number(s[12])}
+function add(raw){const s=String(raw).replace(/[\s-]/g,'');if(!valid(s)){say('Not a valid ISBN-13: '+s);return}if(scans.some(x=>x.isbn===s)){say('Already scanned: '+s);return}scans.push({isbn:s,at:new Date().toISOString()});localStorage.setItem(key,JSON.stringify(scans));render();say('Added '+s+' — scan next book');navigator.vibrate?.(80)}
+async function stop(){active=false;reader?.reset();reader=null;stream?.getTracks().forEach(t=>t.stop());stream=null;el('video').srcObject=null;el('start').disabled=false;el('stop').disabled=true}
+function found(s){if(!/^97[89]\d{10}$/.test(s))return;const now=Date.now();if(s===last&&now-lastTime<2500)return;last=s;lastTime=now;add(s)}
+async function scanNative(detector){while(active){try{for(const x of await detector.detect(el('video'))){found(x.rawValue);break}}catch{}await new Promise(r=>setTimeout(r,180))}}
+async function start(){el('start').disabled=true;say('Requesting camera...');try{stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false});el('video').srcObject=stream;await el('video').play();active=true;el('stop').disabled=false;
+if('BarcodeDetector' in window){const formats=await BarcodeDetector.getSupportedFormats();if(formats.includes('ean_13')){say('Camera ready — scan ISBN barcode.');scanNative(new BarcodeDetector({formats:['ean_13']}));return}}
+say('Loading compatibility scanner...');const script=document.createElement('script');script.src='https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js';await new Promise((ok,fail)=>{script.onload=ok;script.onerror=fail;document.head.append(script)});if(!window.ZXing)throw Error('Scanner library unavailable');stream.getTracks().forEach(t=>t.stop());stream=null;reader=new ZXing.BrowserMultiFormatReader();say('Camera ready — scan ISBN barcode.');reader.decodeFromVideoDevice(undefined,el('video'),result=>{if(result)found(result.getText())}).catch(e=>say('Scanner error: '+e.message))
+}catch(e){await stop();say('Could not start camera: '+(e.message||e.name))}}
+el('start').onclick=start;el('stop').onclick=()=>{stop();say('Stopped.')};
+el('manual').onsubmit=e=>{e.preventDefault();add(el('isbn').value);el('isbn').value=''};
+el('export').onclick=()=>{const csv='ISBN,Scanned At\n'+scans.map(x=>x.isbn+','+x.at).join('\n');const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download='bookshelf-scans.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)};
+el('copy').onclick=async()=>{await navigator.clipboard.writeText(scans.map(x=>x.isbn).join('\n'));say('Copied ISBNs')};
+el('clear').onclick=()=>{if(confirm('Clear saved scans on this device?')){scans=[];localStorage.removeItem(key);render()}};
+render();
+</script></body></html>
